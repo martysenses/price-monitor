@@ -34,8 +34,16 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/122.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "ru-BY,ru;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ru-BY,ru;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 
@@ -212,7 +220,7 @@ def write_csv(results, path):
         w = csv.writer(f, delimiter=";")
         header = ["Обновлено", "Артикул", "Наименование", "Наша цена"]
         for d in domains:
-            header += [d, f"{d} разн.р.", f"{d} разн.%"]
+            header += [d, f"{d} разн.р."]
         w.writerow(header)
 
         for p in prods:
@@ -221,10 +229,9 @@ def write_csv(results, path):
                 ci = p["competitors"].get(d)
                 if ci and ci["price"]:
                     dr = round(ci["price"] - p["our_price"], 2)
-                    dp = round((ci["price"] - p["our_price"]) / p["our_price"] * 100, 1)
-                    row += [ci["price"], dr, dp]
+                    row += [ci["price"], dr]
                 else:
-                    row += [ci["error"] if ci else "—", "", ""]
+                    row += [ci["error"] if ci else "—", ""]
             w.writerow(row)
 
     log.info("CSV: %s", path)
@@ -263,13 +270,12 @@ def write_html(results, path):
             url   = ci["url"]
             if price:
                 dr = round(price - our, 2)
-                dp = round((price - our) / our * 100, 1)
                 if dr > 0.5:
                     cls  = "cheap"
-                    diff = f'<span class="dpos">▲ +{dr} р. (+{dp}%)</span>'
+                    diff = f'<span class="dpos">▲ +{dr} р.</span>'
                 elif dr < -0.5:
                     cls  = "exp"
-                    diff = f'<span class="dneg">▼ {dr} р. ({dp}%)</span>'
+                    diff = f'<span class="dneg">▼ {dr} р.</span>'
                 else:
                     cls  = "eq"
                     diff = '<span class="deq">= одинаково</span>'

@@ -1,0 +1,35 @@
+name: Мониторинг цен
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # каждый день 09:00 Минск (06:00 UTC)
+  workflow_dispatch:       # кнопка «Run workflow» для ручного запуска
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Получить репозиторий
+        uses: actions/checkout@v4
+
+      - name: Установить Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Установить зависимости
+        run: pip install -r requirements.txt
+
+      - name: Запустить парсер
+        run: python monitor.py
+
+      - name: Сохранить результаты в репозиторий
+        run: |
+          git config user.name  "price-bot"
+          git config user.email "price-bot@users.noreply.github.com"
+          git add результаты.csv результаты.html monitor.log
+          git diff --cached --quiet || git commit -m "Обновление цен $(date +'%d.%m.%Y %H:%M')"
+          git push

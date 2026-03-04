@@ -1,7 +1,7 @@
 """
 Мониторинг цен конкурентов — без API
 Вход:  товары.csv
-Выход: результаты.csv + результаты.html
+Выход: результаты.csv + результаты.html  (широкий формат — 1 строка на товар)
 """
 
 import re, csv, json, time, logging
@@ -126,11 +126,11 @@ def parse_tpro(soup):
 
 
 PARSERS = {
-    "21vek.by": parse_21vek,
-    "amd.by":   parse_amd,
+    "21vek.by":  parse_21vek,
+    "amd.by":    parse_amd,
     "voltra.by": parse_voltra,
-    "7745.by":  parse_7745,
-    "tpro.by":  parse_tpro,
+    "7745.by":   parse_7745,
+    "tpro.by":   parse_tpro,
 }
 
 
@@ -174,80 +174,160 @@ def read_products(path):
     return products
 
 
-# ── Запись CSV ────────────────────────────────────────────────
+# ── Группировка: плоский список → широкий (1 строка = 1 товар) ─
+
+def group_results(results):
+    """Возвращает (список товаров, упорядоченные домены)"""
+    all_domains, seen = [], set()
+    for r in results:
+        d = get_domain(r["url"]) if r["url"] != "—" else None
+        if d and d not in seen:
+            seen.add(d)
+            all_domains.append(d)
+
+    products, order = {}, []
+    for r in results:
+        key = r["art"]
+        if key not in products:
+            products[key] = {"art": r["art"], "name": r["name"],
+                              "our_price": r["our_price"], "competitors": {}}
+            order.append(key)
+        d = get_domain(r["url"]) if r["url"] != "—" else None
+        if d:
+            products[key]["competitors"][d] = {
+                "price": r["comp_price"],
+                "url":   r["url"],
+                "error": r.get("error", ""),
+            }
+    return [products[k] for k in order], all_domains
+
+
+# ── Запись CSV (широкий формат) ───────────────────────────────
 
 def write_csv(results, path):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    prods, domains = group_results(results)
+
     with open(path, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["Обновлено","Артикул","Наименование","Наша цена",
-                    "Сайт","Цена конкурента","Разница руб","Разница %","Статус"])
-        for r in results:
-            our, comp = r["our_price"], r["comp_price"]
-            if comp:
-                dr = round(comp - our, 2)
-                dp = round((comp - our) / our * 100, 1)
-                st = "Мы дешевле" if dr > 0.5 else "Мы дороже" if dr < -0.5 else "Одинаково"
-            else:
-                dr = dp = ""
-                st = r.get("error", "Ошибка")
-            domain = get_domain(r["url"]) if r["url"] != "—" else "—"
-            w.writerow([now, r["art"], r["name"], our, domain, comp or "", dr, dp, st])
+        header = ["Обновлено", "Артикул", "Наименование", "Наша цена"]
+        for d in domains:
+            header += [d, f"{d} разн.р.", f"{d} разн.%"]
+        w.writerow(header)
+
+        for p in prods:
+            row = [now, p["art"], p["name"], p["our_price"]]
+            for d in domains:
+                ci = p["competitors"].get(d)
+                if ci and ci["price"]:
+                    dr = round(ci["price"] - p["our_price"], 2)
+                    dp = round((ci["price"] - p["our_price"]) / p["our_price"] * 100, 1)
+                    row += [ci["price"], dr, dp]
+                else:
+                    row += [ci["error"] if ci else "—", "", ""]
+            w.writerow(row)
+
     log.info("CSV: %s", path)
 
 
-# ── Запись HTML ───────────────────────────────────────────────
+# ── Запись HTML (широкий формат) ──────────────────────────────
 
 def write_html(results, path):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    cheaper   = sum(1 for r in results if r["comp_price"] and r["comp_price"] > r["our_price"])
-    expensive = sum(1 for r in results if r["comp_price"] and r["comp_price"] < r["our_price"])
-    errors    = sum(1 for r in results if not r["comp_price"])
+    prods, domains = group_results(results)
+
+    cheaper = expensive = errors = 0
+    for p in prods:
+        for ci in p["competitors"].values():
+            if ci["price"]:
+                if ci["price"] > p["our_price"]: cheaper += 1
+                elif ci["price"] < p["our_price"]: expensive += 1
+            else:
+                errors += 1
+
+    th_comps = "".join(
+        f'<th><a href="https://{d}" target="_blank">{d}</a></th>'
+        for d in domains
+    )
 
     rows = []
-    for r in results:
-        our, comp, url = r["our_price"], r["comp_price"], r["url"]
-        if comp:
-            dr = round(comp - our, 2)
-            dp = round((comp - our) / our * 100, 1)
-            badge = ('<span class="badge cheap">✅ Мы дешевле</span>' if dr > 0.5
-                     else '<span class="badge exp">🔴 Мы дороже</span>' if dr < -0.5
-                     else '<span class="badge eq">➖ Одинаково</span>')
-            diff  = (f'<span class="pos">+{dr} р. (+{dp}%)</span>' if dr > 0.5
-                     else f'<span class="neg">{dr} р. ({dp}%)</span>' if dr < -0.5
-                     else "—")
-            comp_td = f"{comp:.2f} р."
-        else:
-            badge = f'<span class="badge err">⚠️ {r.get("error","Ошибка")}</span>'
-            diff = comp_td = "—"
-        domain = get_domain(url) if url != "—" else "—"
-        link = f'<a href="{url}" target="_blank">{domain}</a>' if url.startswith("http") else domain
-        rows.append(f"<tr><td class='art'>{r['art']}</td><td>{r['name']}</td>"
-                    f"<td class='p'>{our:.2f} р.</td><td>{link}</td>"
-                    f"<td class='p'>{comp_td}</td><td>{diff}</td><td>{badge}</td></tr>")
+    for p in prods:
+        our = p["our_price"]
+        cells = []
+        for d in domains:
+            ci = p["competitors"].get(d)
+            if not ci:
+                cells.append("<td class='na'>—</td>")
+                continue
+            price = ci["price"]
+            url   = ci["url"]
+            if price:
+                dr = round(price - our, 2)
+                dp = round((price - our) / our * 100, 1)
+                if dr > 0.5:
+                    cls  = "cheap"
+                    diff = f'<span class="dpos">▲ +{dr} р. (+{dp}%)</span>'
+                elif dr < -0.5:
+                    cls  = "exp"
+                    diff = f'<span class="dneg">▼ {dr} р. ({dp}%)</span>'
+                else:
+                    cls  = "eq"
+                    diff = '<span class="deq">= одинаково</span>'
+                cells.append(
+                    f'<td class="{cls}">'
+                    f'<a href="{url}" target="_blank">{price:.2f} р.</a>'
+                    f'<br>{diff}</td>'
+                )
+            else:
+                err = ci.get("error", "Ошибка")
+                cells.append(f'<td class="na"><small>⚠️ {err}</small></td>')
 
-    html = f"""<!DOCTYPE html><html lang="ru"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+        rows.append(
+            "<tr>"
+            f"<td class='art'>{p['art']}</td>"
+            f"<td class='name'>{p['name']}</td>"
+            f"<td class='ours'>{our:.2f} р.</td>"
+            + "".join(cells)
+            + "</tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="ru"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Мониторинг цен {now}</title>
 <style>
+*{{box-sizing:border-box}}
 body{{font-family:Arial,sans-serif;background:#f4f6f9;margin:0;padding:20px;color:#333}}
-h1{{font-size:22px;margin-bottom:4px}} .meta{{color:#888;font-size:13px;margin-bottom:20px}}
+h1{{font-size:22px;margin-bottom:4px}}
+.meta{{color:#888;font-size:13px;margin-bottom:20px}}
 .stats{{display:flex;gap:16px;margin-bottom:24px;flex-wrap:wrap}}
 .stat{{background:#fff;border-radius:10px;padding:14px 22px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
 .stat .n{{font-size:28px;font-weight:700}} .stat .l{{font-size:12px;color:#888}}
 .g{{color:#22c55e}} .r{{color:#ef4444}} .gr{{color:#94a3b8}}
-table{{width:100%;border-collapse:collapse;background:#fff;border-radius:10px;
-       overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
-th{{background:#1e293b;color:#fff;padding:12px 14px;text-align:left;
-    font-size:12px;text-transform:uppercase;letter-spacing:.5px;white-space:nowrap}}
-td{{padding:11px 14px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:middle}}
-tr:last-child td{{border-bottom:none}} tr:hover td{{background:#f8fafc}}
-.art{{color:#6366f1;font-weight:600}} .p{{font-weight:600}}
-.pos{{color:#22c55e}} .neg{{color:#ef4444}}
-a{{color:#3b82f6;text-decoration:none}} a:hover{{text-decoration:underline}}
-.badge{{padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;white-space:nowrap}}
-.cheap{{background:#dcfce7;color:#16a34a}} .exp{{background:#fee2e2;color:#dc2626}}
-.eq{{background:#f1f5f9;color:#64748b}} .err{{background:#fef9c3;color:#ca8a04}}
+.wrap{{overflow-x:auto;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
+table{{border-collapse:collapse;background:#fff;width:100%;white-space:nowrap}}
+th{{background:#1e293b;color:#fff;padding:10px 16px;text-align:center;
+    font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-right:1px solid #334}}
+th:nth-child(1),th:nth-child(2),th:nth-child(3){{text-align:left}}
+th a{{color:#93c5fd;text-decoration:none}} th a:hover{{text-decoration:underline}}
+td{{padding:10px 16px;border-bottom:1px solid #f1f5f9;border-right:1px solid #f1f5f9;
+    font-size:13px;vertical-align:middle;text-align:center}}
+td:nth-child(1),td:nth-child(2),td:nth-child(3){{text-align:left}}
+tr:last-child td{{border-bottom:none}}
+tr:hover td{{background:#f8fafc}}
+.art{{color:#6366f1;font-weight:700;font-size:12px}}
+.name{{max-width:200px;white-space:normal;line-height:1.4;font-size:12px}}
+.ours{{font-weight:700;color:#1e293b;white-space:nowrap}}
+a{{color:#3b82f6;text-decoration:none;font-weight:600}}
+a:hover{{text-decoration:underline}}
+.dpos{{display:block;font-size:10px;color:#16a34a;margin-top:2px}}
+.dneg{{display:block;font-size:10px;color:#dc2626;margin-top:2px}}
+.deq{{display:block;font-size:10px;color:#94a3b8;margin-top:2px}}
+.cheap{{background:#f0fdf4}} .cheap a{{color:#16a34a}}
+.exp{{background:#fff1f2}} .exp a{{color:#dc2626}}
+.eq{{background:#fafafa}}
+.na{{color:#cbd5e1;font-size:11px}}
 </style></head><body>
 <h1>📊 Мониторинг цен конкурентов</h1>
 <div class="meta">Обновлено: {now}</div>
@@ -255,11 +335,16 @@ a{{color:#3b82f6;text-decoration:none}} a:hover{{text-decoration:underline}}
   <div class="stat"><div class="n g">{cheaper}</div><div class="l">Мы дешевле</div></div>
   <div class="stat"><div class="n r">{expensive}</div><div class="l">Мы дороже</div></div>
   <div class="stat"><div class="n gr">{errors}</div><div class="l">Ошибок</div></div>
-  <div class="stat"><div class="n gr">{len(results)}</div><div class="l">Сравнений</div></div>
+  <div class="stat"><div class="n gr">{len(prods)}</div><div class="l">Товаров</div></div>
 </div>
-<table><thead><tr><th>Артикул</th><th>Наименование</th><th>Наша цена</th>
-<th>Сайт</th><th>Цена конкурента</th><th>Разница</th><th>Статус</th></tr></thead>
-<tbody>{"".join(rows)}</tbody></table>
+<div class="wrap">
+<table>
+  <thead><tr>
+    <th>Артикул</th><th>Наименование</th><th>Наша цена</th>{th_comps}
+  </tr></thead>
+  <tbody>{"".join(rows)}</tbody>
+</table>
+</div>
 </body></html>"""
 
     Path(path).write_text(html, encoding="utf-8")
@@ -282,10 +367,10 @@ def main():
         log.error("Нет товаров в %s", INPUT_FILE)
         return
 
-    session  = requests.Session()
-    results  = []
-    total    = sum(len(p["urls"]) for p in products)
-    done     = 0
+    session = requests.Session()
+    results = []
+    total   = sum(len(p["urls"]) for p in products)
+    done    = 0
 
     for prod in products:
         if not prod["urls"]:
@@ -295,7 +380,10 @@ def main():
             done += 1
             log.info("[%d/%d]  %s  —  %s", done, total, prod["art"], get_domain(url))
             price, status = fetch_price(url, session)
-            log.info("  %s %.2f р." % ("✓", price) if price else "  ✗ %s" % status)
+            if price:
+                log.info("  ✓ %.2f р.", price)
+            else:
+                log.warning("  ✗ %s", status)
             results.append({"art": prod["art"], "name": prod["name"],
                              "our_price": prod["our_price"],
                              "url": url, "comp_price": price, "error": status})
@@ -304,8 +392,8 @@ def main():
     write_csv(results, OUTPUT_CSV)
     write_html(results, OUTPUT_HTML)
 
-    c = sum(1 for r in results if r["comp_price"] and r["comp_price"] > r["our_price"])
-    e = sum(1 for r in results if r["comp_price"] and r["comp_price"] < r["our_price"])
+    c   = sum(1 for r in results if r["comp_price"] and r["comp_price"] > r["our_price"])
+    e   = sum(1 for r in results if r["comp_price"] and r["comp_price"] < r["our_price"])
     err = sum(1 for r in results if not r["comp_price"])
     log.info("✅ Дешевле: %d  🔴 Дороже: %d  ⚠️ Ошибок: %d", c, e, err)
 

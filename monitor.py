@@ -92,81 +92,148 @@ def _by_selectors(soup, selectors):
 
 
 def _generic(soup):
+    # Сначала ищем элементы с price в классе/id
+    for el in soup.find_all(attrs=True):
+        cls = " ".join(el.get("class", []))
+        eid = el.get("id", "")
+        if re.search(r"price", cls + eid, re.I):
+            txt = el.get_text(" ").strip()
+            # берём только короткие значения (не весь блок)
+            if len(txt) < 30:
+                p = to_float(txt.split()[0] if txt else "")
+                if p and 1 < p < 99999:
+                    return p
+    # Fallback: regex по всему тексту
     text = soup.get_text(" ")
-    matches = re.findall(r"(\d[\d\s]{0,6}[,.]?\d{0,2})\s*(?:руб|р\.|р\b|BYN|byn)", text, re.I)
-    prices = sorted([p for m in matches if (p := to_float(m)) and 0.5 < p < 999_999])
+    matches = re.findall(r"(\d[\d\s]{0,5}[,.]?\d{0,2})\s*(?:руб|р\.|р\b|BYN|byn)", text, re.I)
+    prices = sorted([p for m in matches if (p := to_float(m)) and 1 < p < 99999])
+    # Берём медиану (фильтруем выбросы)
     return prices[len(prices) // 2] if prices else None
 
 
-def parse_21vek(soup):
-    return _by_selectors(soup, [
-        ".price-main__value", ".product-cost__value", ".prices-item__price",
-        "[class*='price_main']", "[class*='price-main']", ".price",
-    ]) or _json_ld(soup) or _generic(soup)
-
-
-def parse_amd(soup):
-    # amd.by: JSON-LD надёжнее всего (type=Product, offers.price)
-    p = _json_ld(soup)
-    if p: return p
-    # fallback: span#priceVal или p.new-price
-    for sel in ("span#priceVal", "p.new-price"):
-        el = soup.select_one(sel)
-        if el:
-            p = to_float(el.get_text())
-            if p: return p
-    return _generic(soup)
-
-
-def parse_voltra(soup):
-    return _by_selectors(soup, [
-        ".product-price", ".price__value",
-        "[class*='product-price']", "[class*='price_value']", ".price",
-    ]) or _json_ld(soup) or _generic(soup)
-
-
-def parse_7745(soup):
-    # 7745.by: несколько вариантов в зависимости от версии HTML
-    # 1. meta itemprop="price"
+def _meta_price(soup):
+    """Цена из микроданных — работает почти на любом сайте."""
+    # <meta itemprop="price" content="527.00">
     el = soup.select_one("meta[itemprop='price']")
     if el:
         p = to_float(el.get("content", ""))
         if p: return p
-    # 2. скрытый input с полной ценой
+    # <span itemprop="price">527.00</span>
+    el = soup.select_one("[itemprop='price']")
+    if el:
+        p = to_float(el.get("content") or el.get_text())
+        if p: return p
+    return None
+
+
+def parse_21vek(soup):
+    # 21vek регулярно меняет CSS-классы — ищем несколькими способами
+    # 1. Актуальные классы 2025-2026
+    p = _by_selectors(soup, [
+        # новые варианты
+        "[class*='ProductPrice']", "[class*='product-price']",
+        "[class*='Price_price']", "[class*='price__val']",
+        # старые варианты
+        ".price-main__value", ".product-cost__value", ".prices-item__price",
+        "[class*='price_main']", "[class*='price-main']",
+    ])
+    if p: return p
+    # 2. Микроданные (надёжный fallback)
+    p = _meta_price(soup)
+    if p: return p
+    # 3. JSON-LD
+    p = _json_ld(soup)
+    if p: return p
+    # 4. data-атрибуты с ценой
+    for el in soup.find_all(attrs={"data-price": True}):
+        p = to_float(el["data-price"])
+        if p: return p
+    # 5. Последний резерв — regex по тексту страницы
+    return _generic(soup)
+
+
+def parse_amd(soup):
+    # amd.by (OpenCart): JSON-LD самый надёжный
+    p = _json_ld(soup)
+    if p: return p
+    # Микроданные
+    p = _meta_price(soup)
+    if p: return p
+    # CSS-селекторы OpenCart
+    p = _by_selectors(soup, [
+        "p.new-price", ".new-price-tov .new-price",
+        "span#priceVal", ".price-new", ".product-price",
+    ])
+    if p: return p
+    return _generic(soup)
+
+
+def parse_voltra(soup):
+    # voltra.by
+    p = _by_selectors(soup, [
+        ".product-price__value", ".product-price",
+        ".price__value", ".price-current",
+        "[class*='product-price']", "[class*='price_value']",
+        "[class*='price__val']",
+    ])
+    if p: return p
+    p = _meta_price(soup)
+    if p: return p
+    return _json_ld(soup) or _generic(soup)
+
+
+def parse_7745(soup):
+    # 7745.by: пробуем все известные варианты
+    # 1. Микроданные — самый надёжный способ
+    p = _meta_price(soup)
+    if p: return p
+    # 2. Скрытый input с полной ценой
     el = soup.select_one("#creditPriceFull")
     if el:
         p = to_float(el.get("value", ""))
         if p: return p
-    # 3. JSON внутри скрытого input bestCreditOffers — ищем priceFull
+    # 3. JSON внутри скрытого input bestCreditOffers
     el = soup.select_one("#bestCreditOffers")
     if el:
         try:
-            import json as _json
-            data = _json.loads(el.get("value", "{}"))
-            # берём первый priceFull
+            data = json.loads(el.get("value", "{}"))
             for months in data.values():
                 for pct in months.values():
                     pf = to_float(str(pct.get("priceFull", "")))
                     if pf: return pf
         except Exception:
             pass
-    # 4. обычные текстовые селекторы
-    return _by_selectors(soup, [
-        ".product__price-current", ".product__price",
-        "[class*='price-current']",
-    ]) or _json_ld(soup) or _generic(soup)
+    # 4. JSON-LD
+    p = _json_ld(soup)
+    if p: return p
+    # 5. CSS-селекторы
+    p = _by_selectors(soup, [
+        ".product__price-current", ".product__price-value",
+        ".product__price", "[class*='price-current']",
+        "[class*='price_current']", ".price-actual",
+    ])
+    if p: return p
+    # 6. data-атрибуты
+    for el in soup.find_all(attrs={"data-price": True}):
+        p = to_float(el["data-price"])
+        if p: return p
+    return _generic(soup)
 
 
 def parse_tpro(soup):
-    # tpro.by (Bitrix): span.priceVal — первый активный (не закомментированный)
+    # tpro.by (1C-Bitrix)
     el = soup.select_one("span.priceVal")
     if el:
         p = to_float(el.get_text())
         if p: return p
-    return _by_selectors(soup, [
+    p = _by_selectors(soup, [
         ".priceContainer span", "[class*='priceVal']",
-        "a.price span", ".price",
-    ]) or _json_ld(soup) or _generic(soup)
+        ".price_value", "a.price span",
+    ])
+    if p: return p
+    p = _meta_price(soup)
+    if p: return p
+    return _json_ld(soup) or _generic(soup)
 
 
 PARSERS = {
@@ -212,19 +279,24 @@ def fetch_price(url, session):
         price = parser(soup)
         if price:
             return price, "OK"
-        # Сохраняем HTML для отладки если цена не найдена
+
+        # Цена не найдена — сохраняем HTML для отладки
         debug_file = f"debug_{domain.replace('.', '_')}.html"
         try:
             with open(debug_file, "w", encoding="utf-8") as f:
                 f.write(r.text)
-            log.warning("Цена не найдена на %s — HTML сохранён в %s", domain, debug_file)
+            log.warning("Цена не найдена на %s (HTML: %s, размер: %d байт)",
+                        domain, debug_file, len(r.text))
         except Exception:
             pass
         return None, "Цена не найдена"
     except requests.exceptions.Timeout:
         return None, "Таймаут"
     except requests.exceptions.HTTPError as e:
-        return None, f"HTTP {e.response.status_code}"
+        code = e.response.status_code
+        if code == 403:
+            log.error("HTTP 403 на %s — геоблок. Запустите парсер локально с ПК.", get_domain(url))
+        return None, f"HTTP {code}"
     except Exception as e:
         return None, f"Ошибка: {str(e)[:60]}"
 

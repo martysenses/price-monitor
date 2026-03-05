@@ -126,12 +126,31 @@ def parse_voltra(soup):
 
 
 def parse_7745(soup):
-    # 7745.by: meta itemprop="price" content="690.00"
+    # 7745.by: несколько вариантов в зависимости от версии HTML
+    # 1. meta itemprop="price"
     el = soup.select_one("meta[itemprop='price']")
     if el:
         p = to_float(el.get("content", ""))
         if p: return p
-    # fallback: текст в product__price
+    # 2. скрытый input с полной ценой
+    el = soup.select_one("#creditPriceFull")
+    if el:
+        p = to_float(el.get("value", ""))
+        if p: return p
+    # 3. JSON внутри скрытого input bestCreditOffers — ищем priceFull
+    el = soup.select_one("#bestCreditOffers")
+    if el:
+        try:
+            import json as _json
+            data = _json.loads(el.get("value", "{}"))
+            # берём первый priceFull
+            for months in data.values():
+                for pct in months.values():
+                    pf = to_float(str(pct.get("priceFull", "")))
+                    if pf: return pf
+        except Exception:
+            pass
+    # 4. обычные текстовые селекторы
     return _by_selectors(soup, [
         ".product__price-current", ".product__price",
         "[class*='price-current']",

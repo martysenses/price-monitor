@@ -210,7 +210,17 @@ def fetch_price(url, session):
         soup = BeautifulSoup(r.text, "lxml")
         parser = next((fn for k, fn in PARSERS.items() if k in domain), _generic)
         price = parser(soup)
-        return (price, "OK") if price else (None, "Цена не найдена")
+        if price:
+            return price, "OK"
+        # Сохраняем HTML для отладки если цена не найдена
+        debug_file = f"debug_{domain.replace('.', '_')}.html"
+        try:
+            with open(debug_file, "w", encoding="utf-8") as f:
+                f.write(r.text)
+            log.warning("Цена не найдена на %s — HTML сохранён в %s", domain, debug_file)
+        except Exception:
+            pass
+        return None, "Цена не найдена"
     except requests.exceptions.Timeout:
         return None, "Таймаут"
     except requests.exceptions.HTTPError as e:

@@ -106,10 +106,16 @@ def parse_21vek(soup):
 
 
 def parse_amd(soup):
-    return _by_selectors(soup, [
-        ".product-buy__price", ".price-main",
-        "[class*='product-price']", "[class*='buy__price']", ".price",
-    ]) or _json_ld(soup) or _generic(soup)
+    # amd.by: JSON-LD надёжнее всего (type=Product, offers.price)
+    p = _json_ld(soup)
+    if p: return p
+    # fallback: span#priceVal или p.new-price
+    for sel in ("span#priceVal", "p.new-price"):
+        el = soup.select_one(sel)
+        if el:
+            p = to_float(el.get_text())
+            if p: return p
+    return _generic(soup)
 
 
 def parse_voltra(soup):
@@ -120,16 +126,27 @@ def parse_voltra(soup):
 
 
 def parse_7745(soup):
+    # 7745.by: meta itemprop="price" content="690.00"
+    el = soup.select_one("meta[itemprop='price']")
+    if el:
+        p = to_float(el.get("content", ""))
+        if p: return p
+    # fallback: текст в product__price
     return _by_selectors(soup, [
-        ".product-card__price-current", ".price-value",
-        "[class*='price-current']", "[class*='price__value']", ".price",
+        ".product__price-current", ".product__price",
+        "[class*='price-current']",
     ]) or _json_ld(soup) or _generic(soup)
 
 
 def parse_tpro(soup):
+    # tpro.by (Bitrix): span.priceVal — первый активный (не закомментированный)
+    el = soup.select_one("span.priceVal")
+    if el:
+        p = to_float(el.get_text())
+        if p: return p
     return _by_selectors(soup, [
-        ".product-price", ".price",
-        "[class*='product-price']", "span.price", "div.price",
+        ".priceContainer span", "[class*='priceVal']",
+        "a.price span", ".price",
     ]) or _json_ld(soup) or _generic(soup)
 
 
@@ -142,15 +159,36 @@ PARSERS = {
 }
 
 
+def _warm_up(session, base_url):
+    """Посещаем главную страницу сайта, чтобы получить куки (обход 403)."""
+    try:
+        session.get(base_url, timeout=15, headers=HEADERS)
+        time.sleep(1.0)
+    except Exception:
+        pass
+
+
+# Кэш: сайты, для которых уже сделан warm-up в этом запуске
+_warmed: set = set()
+
+
 def fetch_price(url, session):
     if not url.startswith("http"):
         return None, "Нет ссылки"
     try:
-        r = session.get(url, timeout=20, headers=HEADERS)
+        domain = get_domain(url)
+
+        # Для amd.by и 7745.by делаем warm-up один раз за запуск
+        if domain not in _warmed and any(d in domain for d in ("amd.by", "7745.by")):
+            base = re.match(r"(https?://[^/]+)", url).group(1)
+            log.info("Warm-up: %s", base)
+            _warm_up(session, base)
+            _warmed.add(domain)
+
+        r = session.get(url, timeout=25, headers=HEADERS)
         r.raise_for_status()
         r.encoding = r.apparent_encoding
         soup = BeautifulSoup(r.text, "lxml")
-        domain = get_domain(url)
         parser = next((fn for k, fn in PARSERS.items() if k in domain), _generic)
         price = parser(soup)
         return (price, "OK") if price else (None, "Цена не найдена")
